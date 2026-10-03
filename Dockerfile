@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 COPY . /app
 
 # Pre-download PaddleOCR Arabic/English detection & recognition models during build for cold-start performance
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=True, lang='ar')" || true
+RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=True, lang='ar', use_gpu=False, show_log=False)" || true
 
 EXPOSE 8000
 

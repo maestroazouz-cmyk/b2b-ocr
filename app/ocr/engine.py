@@ -29,6 +29,8 @@ class PaddleOCREngine:
             self._ocr = PaddleOCR(
                 use_angle_cls=True,
                 lang="ar",  # Supports Arabic, Latin, and digits seamlessly
+                use_gpu=False,
+                show_log=False,
             )
             logger.info("PaddleOCR engine initialized successfully.")
         except ImportError as e:
