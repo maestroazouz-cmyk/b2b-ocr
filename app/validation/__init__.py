@@ -1,0 +1,3 @@
+"""
+Receipt business validation engine
+"""

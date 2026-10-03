@@ -1,0 +1,18 @@
+# Web API Framework
+fastapi==0.110.0
+uvicorn[standard]==0.28.0
+pydantic==2.6.4
+
+# Computer Vision & Image Processing
+opencv-python-headless==4.8.1.78
+Pillow==10.2.0
+numpy==1.26.4
+
+# PaddlePaddle & PaddleOCR Deep Learning Framework
+# Note: paddlepaddle CPU build optimized with MKLDNN for standard cloud servers
+paddlepaddle==2.6.0
+paddleocr>=2.8.0
+
+# Utilities
+python-multipart==0.0.9
+pytz==2024.1
