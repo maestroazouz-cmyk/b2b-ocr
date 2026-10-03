@@ -27,10 +27,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # Copy microservice source code
 COPY . /app
 
-# Pre-download PaddleOCR Arabic/English detection & recognition models during build for cold-start performance
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=True, lang='ar', use_gpu=False, show_log=False)" || true
-
 EXPOSE 8000
 
-# Run FastAPI ASGI server with uvicorn respecting Cloud Run dynamic $PORT
+# Run FastAPI ASGI server with uvicorn respecting dynamic $PORT
 CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --timeout-keep-alive 60"]
