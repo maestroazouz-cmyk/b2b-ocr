@@ -10,7 +10,7 @@ numpy==1.26.4
 
 # PaddlePaddle & PaddleOCR Deep Learning Framework
 # Note: paddlepaddle CPU build optimized with MKLDNN for standard cloud servers
-paddlepaddle==2.6.0
+paddlepaddle==2.6.2
 paddleocr>=2.8.0
 
 # Utilities
