@@ -114,7 +114,9 @@ async def process_ocr(request: OCRRequest):
 
     # 3. Deterministic Sudanese Receipt Parsing
     parser_start = time.time()
-    structured_data = SudaneseReceiptParser.parse(tokens, quality_assessment)
+    structured_data = SudaneseReceiptParser.parse(
+        tokens, quality_assessment, image_bgr=processed_image, ocr_engine=ocr_engine
+    )
 
     # 4. Validation Engine Check
     is_valid, validation_warnings = ReceiptValidator.validate(structured_data)

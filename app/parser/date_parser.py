@@ -13,12 +13,30 @@ except ImportError:
 class DateParser:
     """
     Extracts transaction date and time with strict Africa/Khartoum timezone grounding.
+    Supports ISO, European, and Named Month date formats (e.g. 03-Oct-2026, 03/10/2026).
     Flags future dates relative to current Africa/Khartoum calendar date.
     """
 
     ARABIC_INDIC_MAP = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 
+    MONTH_MAP = {
+        "jan": "01", "january": "01", "يناير": "01",
+        "feb": "02", "february": "02", "فبراير": "02",
+        "mar": "03", "march": "03", "مارس": "03",
+        "apr": "04", "april": "04", "أبريل": "04", "ابريل": "04",
+        "may": "05", "مايو": "05",
+        "jun": "06", "june": "06", "يونيو": "06",
+        "jul": "07", "july": "07", "يوليو": "07",
+        "aug": "08", "august": "08", "أغسطس": "08", "اغسطس": "08",
+        "sep": "09", "september": "09", "سبتمبر": "09", "0ct": "10",
+        "oct": "10", "october": "10", "أكتوبر": "10", "اكتوبر": "10",
+        "nov": "11", "november": "11", "نوفمبر": "11",
+        "dec": "12", "december": "12", "ديسمبر": "12",
+    }
+
     DATE_PATTERNS = [
+        # Named month: DD-Mon-YYYY (e.g. 03-Oct-2026 or 03-0ct-2026 or 03/Oct/2026)
+        (r"\b(0[1-9]|[12]\d|3[01])[\/\-\s]([A-Za-z0-9]{3,9}|[\u0600-\u06FF]{3,9})[\/\-\s](20\d{2})\b", "TEXT_DMY"),
         # YYYY-MM-DD or YYYY/MM/DD
         (r"\b(20\d{2})[\/\-\.](0[1-9]|1[0-2])[\/\-\.](0[1-9]|[12]\d|3[01])\b", "YMD"),
         # DD-MM-YYYY or DD/MM/YYYY
@@ -26,13 +44,22 @@ class DateParser:
     ]
 
     TIME_PATTERNS = [
-        # 14:30:15 or 02:30:15 PM
+        # 10:52:07 or 14:30:15 or 02:30:15 PM
         r"\b([01]?\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\s*(AM|PM|ص|م))?\b",
         # 14:30 or 02:30 PM
         r"\b([01]?\d|2[0-3]):([0-5]\d)(?:\s*(AM|PM|ص|م))?\b",
     ]
 
-    DATE_KEYWORDS = ["التاريخ", "تاريخ العملية", "تاريخ التحويل", "Date", "Transaction Date", "Time"]
+    DATE_KEYWORDS = [
+        "التاريخ",
+        "التاريخ والزمن",
+        "تاريخ العملية",
+        "تاريخ التحويل",
+        "Date",
+        "Transaction Date",
+        "Time",
+        "Date & Time",
+    ]
 
     @classmethod
     def get_current_khartoum_date(cls) -> str:
@@ -115,6 +142,15 @@ class DateParser:
                     )
                     break
 
+        # If time is still missing, scan for standalone time pattern
+        if not best_time:
+            for token in tokens:
+                norm_text = cls.normalize_digits(token.text).strip()
+                t = cls._extract_time(norm_text)
+                if t:
+                    best_time = t
+                    break
+
         # Timezone validation
         is_future = False
         is_today = False
@@ -142,15 +178,26 @@ class DateParser:
 
     @classmethod
     def _extract_date(cls, text: str) -> Optional[str]:
+        # Handle OCR character confusions in month names like 0ct -> Oct
+        normalized_str = text.replace("0ct", "Oct").replace("0CT", "Oct")
+
         for pattern, fmt in cls.DATE_PATTERNS:
-            match = re.search(pattern, text)
+            match = re.search(pattern, normalized_str, re.IGNORECASE)
             if match:
                 g = match.groups()
-                if fmt == "YMD":
+                if fmt == "TEXT_DMY":
+                    day = g[0].zfill(2)
+                    month_key = g[1].lower()
+                    year = g[2]
+                    month_num = cls.MONTH_MAP.get(month_key)
+                    if month_num:
+                        return f"{year}-{month_num}-{day}"
+                elif fmt == "YMD":
                     year, month, day = g[0], g[1].zfill(2), g[2].zfill(2)
-                else:
+                    return f"{year}-{month}-{day}"
+                elif fmt == "DMY":
                     day, month, year = g[0].zfill(2), g[1].zfill(2), g[2]
-                return f"{year}-{month}-{day}"
+                    return f"{year}-{month}-{day}"
         return None
 
     @classmethod

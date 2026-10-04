@@ -1,5 +1,10 @@
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 from app.models.schemas import (
     OCRToken,
     StructuredReceiptData,
@@ -12,17 +17,33 @@ from app.parser.transaction_parser import TransactionParser
 from app.parser.date_parser import DateParser
 from app.parser.party_parser import PartyParser
 from app.parser.bank_parser import BankParser
+from app.parser.bok_layout_parser import BankOfKhartoumLayoutParser
 from app.confidence.scorer import ConfidenceScorer
 
 
 class SudaneseReceiptParser:
     """
-    Orchestrates specialized sub-parsers to extract structured banking vouchers.
+    Orchestrates two-stage receipt OCR parsing:
+    1. Deterministic Structured Layout Detection (e.g. Bank of Khartoum vouchers).
+    2. Robust Generic Sub-Parser Pipeline for multi-bank and mobile wallet vouchers.
     Enforces strict anti-hallucination guardrails and generates full evidence map.
     """
 
     @classmethod
-    def parse(cls, tokens: List[OCRToken], image_quality: ImageQuality) -> StructuredReceiptData:
+    def parse(
+        cls,
+        tokens: List[OCRToken],
+        image_quality: ImageQuality,
+        image_bgr: Optional[Any] = None,
+        ocr_engine: Optional[Any] = None,
+    ) -> StructuredReceiptData:
+        # Check if receipt matches structured Bank of Khartoum layout
+        if BankOfKhartoumLayoutParser.matches_layout(tokens):
+            return BankOfKhartoumLayoutParser.parse_bok_voucher(
+                tokens, image_quality, image_bgr, ocr_engine
+            )
+
+        # Fallback to Generic Multi-bank / Wallet Parser
         raw_text = "\n".join(t.text for t in tokens)
 
         # 1. Sub-parsers
@@ -91,6 +112,8 @@ class SudaneseReceiptParser:
             warnings.append("Transaction reference number is not clearly visible on the receipt. Manual verification required.")
         if not tx_date:
             warnings.append("Transaction execution date could not be identified with confidence. Human verification required.")
+        if not amount_val:
+            warnings.append("Amount could not be identified with confidence. Human verification required.")
         if image_quality.quality_status.value in ["POOR", "UNUSABLE"]:
             warnings.append(f"Image quality is {image_quality.quality_status.value.lower()} ({', '.join(image_quality.quality_issues) or 'defects detected'}).")
 
@@ -99,6 +122,7 @@ class SudaneseReceiptParser:
             or val_meta.is_future_date
             or not ref_num
             or not tx_date
+            or not amount_val
             or overall_conf < 0.85
         )
 
@@ -128,7 +152,7 @@ class SudaneseReceiptParser:
             overall_confidence=round(overall_conf, 2),
             warnings=warnings,
             review_required=review_required,
-            extraction_version="b2b-ocr-v1",
+            extraction_version="b2b-ocr-v2",
             evidence_map=evidence_map,
             validation_metadata=val_meta,
             result_status=status,

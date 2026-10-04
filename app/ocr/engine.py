@@ -3,6 +3,7 @@ from typing import List, Optional
 import numpy as np
 
 from app.models.schemas import OCRToken, BoundingBox
+from app.ocr.rtl_normalizer import RTLNormalizer
 
 logger = logging.getLogger("b2b_ocr.engine")
 
@@ -11,6 +12,7 @@ class PaddleOCREngine:
     """
     PaddleOCR inference engine with Arabic/English multilingual pipeline.
     Preserves raw tokens, confidence scores, and spatial polygon bounding boxes.
+    Supports Stage 1 full image inference and Stage 2 field crop refinement.
     """
 
     _instance: Optional["PaddleOCREngine"] = None
@@ -50,7 +52,6 @@ class PaddleOCREngine:
         Runs PaddleOCR inference on image array and returns vertically sorted OCRToken list.
         """
         if self._ocr is None:
-            # Re-attempt initialization
             self._initialize_ocr()
             if self._ocr is None:
                 raise RuntimeError(
@@ -81,10 +82,10 @@ class PaddleOCREngine:
             if not text_conf or len(text_conf) < 2:
                 continue
 
-            text = str(text_conf[0]).strip()
+            raw_text = str(text_conf[0]).strip()
             confidence = float(text_conf[1]) if text_conf[1] is not None else 0.0
 
-            if not text:
+            if not raw_text:
                 continue
 
             # Compute axis-aligned bounding box from 4 polygon points
@@ -103,9 +104,12 @@ class PaddleOCREngine:
                 raw_points=points,
             )
 
+            # Apply RTL token normalization to Arabic label/value tokens
+            normalized_text = RTLNormalizer.normalize_token_text(raw_text)
+
             tokens.append(
                 OCRToken(
-                    text=text,
+                    text=normalized_text,
                     confidence=confidence,
                     bounding_box=bbox,
                 )
@@ -129,6 +133,42 @@ class PaddleOCREngine:
                     curr.line_index = current_line
 
         return tokens
+
+    def extract_tokens_from_crop(self, crop_bgr: np.ndarray) -> List[OCRToken]:
+        """
+        Runs secondary OCR on an isolated cropped field region for maximum character accuracy.
+        """
+        if self._ocr is None:
+            return []
+        try:
+            results = self._ocr.ocr(crop_bgr, cls=True)
+            if not results or not results[0]:
+                return []
+            crop_tokens = []
+            for item in results[0]:
+                if not item or len(item) < 2:
+                    continue
+                points = item[0]
+                text_conf = item[1]
+                if not text_conf:
+                    continue
+                text = str(text_conf[0]).strip()
+                conf = float(text_conf[1]) if text_conf[1] is not None else 0.0
+                if text:
+                    xs = [p[0] for p in points]
+                    ys = [p[1] for p in points]
+                    bbox = BoundingBox(
+                        x=float(min(xs)),
+                        y=float(min(ys)),
+                        width=float(max(xs) - min(xs)),
+                        height=float(max(ys) - min_ys) if 'min_ys' in locals() else float(max(ys) - min(ys)),
+                        raw_points=points,
+                    )
+                    crop_tokens.append(OCRToken(text=text, confidence=conf, bounding_box=bbox))
+            return crop_tokens
+        except Exception as e:
+            logger.warning(f"Secondary crop OCR failed: {e}")
+            return []
 
 
 ocr_engine = PaddleOCREngine()
