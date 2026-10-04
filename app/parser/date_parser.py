@@ -14,6 +14,7 @@ class DateParser:
     """
     Extracts transaction date and time with strict Africa/Khartoum timezone grounding.
     Supports ISO, European, and Named Month date formats (e.g. 03-Oct-2026, 03/10/2026).
+    Handles localized OCR substitutions (e.g. O3-0ct-2026 -> 2026-10-03).
     Flags future dates relative to current Africa/Khartoum calendar date.
     """
 
@@ -28,14 +29,14 @@ class DateParser:
         "jun": "06", "june": "06", "يونيو": "06",
         "jul": "07", "july": "07", "يوليو": "07",
         "aug": "08", "august": "08", "أغسطس": "08", "اغسطس": "08",
-        "sep": "09", "september": "09", "سبتمبر": "09", "0ct": "10",
-        "oct": "10", "october": "10", "أكتوبر": "10", "اكتوبر": "10",
+        "sep": "09", "september": "09", "سبتمبر": "09", "5ep": "09",
+        "oct": "10", "october": "10", "0ct": "10", "أكتوبر": "10", "اكتوبر": "10",
         "nov": "11", "november": "11", "نوفمبر": "11",
         "dec": "12", "december": "12", "ديسمبر": "12",
     }
 
     DATE_PATTERNS = [
-        # Named month: DD-Mon-YYYY (e.g. 03-Oct-2026 or 03-0ct-2026 or 03/Oct/2026)
+        # Named month: DD-Mon-YYYY (e.g. 03-Oct-2026 or 03-0ct-2026 or 03/Oct/2026 or O3-0ct-2026)
         (r"\b(0[1-9]|[12]\d|3[01])[\/\-\s]([A-Za-z0-9]{3,9}|[\u0600-\u06FF]{3,9})[\/\-\s](20\d{2})\b", "TEXT_DMY"),
         # YYYY-MM-DD or YYYY/MM/DD
         (r"\b(20\d{2})[\/\-\.](0[1-9]|1[0-2])[\/\-\.](0[1-9]|[12]\d|3[01])\b", "YMD"),
@@ -178,11 +179,22 @@ class DateParser:
 
     @classmethod
     def _extract_date(cls, text: str) -> Optional[str]:
-        # Handle OCR character confusions in month names like 0ct -> Oct
-        normalized_str = text.replace("0ct", "Oct").replace("0CT", "Oct")
+        if not text:
+            return None
+
+        # Conservative OCR substitutions inside date string candidate:
+        s = text.strip()
+        s = re.sub(r"\b[Oo](\d)", r"0\1", s)
+        s = re.sub(r"(\-)[Oo](\d)", r"\g<1>0\g<2>", s)
+        s = re.sub(r"(\/)[Oo](\d)", r"\g<1>0\g<2>", s)
+        s = re.sub(r"\b[Oo]([A-Za-z])", r"0\1", s)
+
+        # Normalize common OCR month representations
+        s = s.replace("0ct", "Oct").replace("0CT", "Oct").replace("oCT", "Oct").replace("oct", "Oct")
+        s = s.replace("5ep", "Sep").replace("sep", "Sep")
 
         for pattern, fmt in cls.DATE_PATTERNS:
-            match = re.search(pattern, normalized_str, re.IGNORECASE)
+            match = re.search(pattern, s, re.IGNORECASE)
             if match:
                 g = match.groups()
                 if fmt == "TEXT_DMY":
@@ -202,8 +214,13 @@ class DateParser:
 
     @classmethod
     def _extract_time(cls, text: str) -> Optional[str]:
+        if not text:
+            return None
+        # Handle OCR substitutions for time: e.g. l0:52:07 -> 10:52:07 or I0: -> 10:
+        s = re.sub(r"\b[lI](\d):", r"1\1:", text.strip())
+
         for pattern in cls.TIME_PATTERNS:
-            match = re.search(pattern, text, re.IGNORECASE)
+            match = re.search(pattern, s, re.IGNORECASE)
             if match:
                 g = match.groups()
                 hour = int(g[0])

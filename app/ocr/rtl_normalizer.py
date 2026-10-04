@@ -9,7 +9,7 @@ class RTLNormalizer:
     without altering numbers, dates, times, or Latin tokens.
     """
 
-    # Dictionary of common banking labels in their standard and reversed forms
+    # Dictionary of common banking labels and names in their reversed forms
     REVERSED_ARABIC_MAP = {
         # Operation / Transaction
         "ةيلمعلا": "العملية",
@@ -31,21 +31,41 @@ class RTLNormalizer:
         "نم باسح": "من حساب",
         "ىلا باسح": "الى حساب",
         "يلا باسح": "الى حساب",
+        "حساب لا": "الى حساب",
+        "باسح لا": "الى حساب",
+        "لا باسح": "الى حساب",
+        "حسابلا": "الى حساب",
         "نم": "من",
         "ىلا": "الى",
         "يلا": "الى",
-        # Parties
+        # Parties & Labels
         "ماسا": "اسم",
+        "مسأ": "اسم",
         "مسإ": "إسم",
         "لسرمل": "المرسل",
         "لسرملا": "المرسل",
+        "المرسل": "المرسل",
         "هيلا": "اليه",
         "هيلي": "اليه",
+        "اليه": "اليه",
         "هيلا لسرمل": "المرسل اليه",
         "هيلا لسرمل ماسا": "اسم المرسل اليه",
         "ديفتسلما": "المستفيد",
         "ديفَتسلما": "المستفيد",
         "ليموعلا": "العميل",
+        # Common Name Components (Reversed -> Normal)
+        "وذ": "ذو",
+        "نونلا": "النون",
+        "مشاه": "هاشم",
+        "يلع": "علي",
+        "دمحا": "احمد",
+        "دمحم": "محمد",
+        "دومحم": "محمود",
+        "للها دبع": "عبد الله",
+        "دبع": "عبد",
+        "نامثع": "عثمان",
+        "نسح": "حسن",
+        "نيسح": "حسين",
         # Mobile & Narration
         "ليابوملا": "الموبايل",
         "ليابوم": "الموبايل",
@@ -89,7 +109,6 @@ class RTLNormalizer:
     @classmethod
     def reverse_arabic_string(cls, text: str) -> str:
         """Reverses Arabic character sequence if it was CTC-reversed."""
-        # Split words while preserving order of numbers / Latin
         words = text.split()
         reversed_words = []
         for w in words:
@@ -129,7 +148,6 @@ class RTLNormalizer:
 
         reconstructed = " ".join(normalized_words)
 
-        # Check if reconstructed phrase matches dictionary
         if reconstructed in cls.REVERSED_ARABIC_MAP:
             return cls.REVERSED_ARABIC_MAP[reconstructed]
 
@@ -143,7 +161,6 @@ class RTLNormalizer:
         normalized_list: List[OCRToken] = []
         for tok in tokens:
             norm_text = cls.normalize_token_text(tok.text)
-            # Create token copy
             new_tok = OCRToken(
                 text=norm_text,
                 confidence=tok.confidence,

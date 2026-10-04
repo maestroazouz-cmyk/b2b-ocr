@@ -4,16 +4,18 @@ from typing import Dict
 class ConfidenceScorer:
     """
     Weighted confidence scoring based on visual OCR token accuracy,
-    field proximity, and image quality metrics.
+    field proximity, and presence/absence of all required structured fields.
     """
 
     WEIGHTS = {
-        "amount": 0.25,
-        "reference_number": 0.25,
-        "sender_phone": 0.20,
+        "amount": 0.20,
+        "reference_number": 0.20,
         "transaction_date": 0.15,
-        "bank_name": 0.10,
-        "sender_name": 0.05,
+        "transaction_time": 0.05,
+        "sender_account": 0.15,
+        "receiver_account": 0.15,
+        "receiver_name": 0.05,
+        "bank_name": 0.05,
     }
 
     @classmethod
@@ -30,7 +32,7 @@ class ConfidenceScorer:
 
         base_conf = total_score / total_weight if total_weight > 0 else 0.0
 
-        # Adjust slightly with image quality factor
+        # Adjust slightly if image quality is degraded
         if image_quality_score < 0.60:
             base_conf *= max(0.5, image_quality_score)
 

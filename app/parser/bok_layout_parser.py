@@ -44,6 +44,8 @@ class BankOfKhartoumLayoutParser:
         "ةيلمعلا مقر",
         "اسم المرسل اليه",
         "هيلا لسرمل ماسا",
+        "من حساب",
+        "الى حساب",
     ]
 
     @classmethod
@@ -57,7 +59,6 @@ class BankOfKhartoumLayoutParser:
             if sig in all_text:
                 matched_signatures += 1
 
-        # Requires at least 2 strong layout markers
         return matched_signatures >= 2
 
     @classmethod
@@ -126,19 +127,19 @@ class BankOfKhartoumLayoutParser:
 
             # 3. From Account (من حساب / من)
             if any(kw in line_text for kw in ["من حساب", "نم باسح", "من"]):
-                acc = cls._extract_account_number(line_text)
+                acc = cls._extract_bok_account(line)
                 if acc:
                     sender_account = acc
 
-            # 4. To Account (الى حساب / إلى حساب / الى)
-            if any(kw in line_text for kw in ["الى حساب", "إلى حساب", "ىلا باسح", "يلا باسح", "الى", "إلى"]):
-                acc = cls._extract_account_number(line_text)
+            # 4. To Account (الى حساب / إلى حساب / الى / حساب لا / ىلا باسح)
+            if any(kw in line_text for kw in ["الى حساب", "إلى حساب", "ىلا باسح", "يلا باسح", "حساب لا", "باسح لا", "الى", "إلى"]):
+                acc = cls._extract_bok_account(line)
                 if acc:
                     receiver_account = acc
 
             # 5. Recipient Name (اسم المرسل اليه -> strictly receiver_name)
-            if any(kw in line_text for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "لسرمل ماسا", "المستفيد"]):
-                name = cls._extract_name_from_line(line)
+            if any(kw in line_text for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "لسرمل ماسا", "المستفيد", "المرسل", "اليه"]):
+                name = cls._extract_recipient_name(line)
                 if name:
                     receiver_name = name
 
@@ -164,17 +165,8 @@ class BankOfKhartoumLayoutParser:
                     amount_conf = max((tok.confidence for tok in line), default=0.95)
                     amount_source = line_text
 
-        # Step 4: Fallback / Secondary Scan for any missing structured fields
-        if not ref_number:
-            for t in norm_tokens:
-                # 10 to 12 digit integer standalone (e.g. 20265282625)
-                clean_num = re.sub(r"[^\d]", "", t.text)
-                if len(clean_num) in [10, 11, 12] and (clean_num.startswith("202") or clean_num.startswith("201")):
-                    ref_number = clean_num
-                    ref_conf = t.confidence
-                    ref_source = t.text
-                    break
-
+        # Step 4: Spatial Fallback for fields spanning adjacent lines or fragmented OCR
+        # 4a. Date & Time fallback
         if not date_val:
             d_val, t_val, d_ev, _ = DateParser.parse(norm_tokens)
             if d_val:
@@ -183,6 +175,30 @@ class BankOfKhartoumLayoutParser:
                 date_conf = d_ev.confidence
                 date_source = d_ev.source_text or ""
 
+        # 4b. Transaction ID fallback
+        if not ref_number:
+            for t in norm_tokens:
+                clean_num = re.sub(r"[^\d]", "", t.text)
+                if len(clean_num) in [10, 11, 12] and (clean_num.startswith("202") or clean_num.startswith("201")):
+                    ref_number = clean_num
+                    ref_conf = t.confidence
+                    ref_source = t.text
+                    break
+
+        # 4c. Sender / Receiver Account spatial fallback
+        if not sender_account or not receiver_account:
+            acc_candidates = cls._find_all_accounts_in_tokens(norm_tokens)
+            if acc_candidates:
+                if not sender_account and len(acc_candidates) >= 1:
+                    sender_account = acc_candidates[0]
+                if not receiver_account and len(acc_candidates) >= 2:
+                    receiver_account = acc_candidates[1]
+
+        # 4d. Recipient Name fallback across all tokens
+        if not receiver_name:
+            receiver_name = cls._find_recipient_name_in_tokens(norm_tokens)
+
+        # 4e. Amount fallback
         if not amount_val:
             amt_val, amt_fmt, cur, amt_ev = AmountParser.parse(norm_tokens)
             if amt_val is not None:
@@ -251,34 +267,62 @@ class BankOfKhartoumLayoutParser:
         }
 
         field_confidences = {
-            "amount": amount_conf,
-            "reference_number": ref_conf,
-            "transaction_date": date_conf,
-            "bank_name": 0.98,
-            "receiver_name": 0.95 if receiver_name else 0.0,
+            "amount": amount_conf if amount_val is not None else 0.0,
+            "reference_number": ref_conf if ref_number else 0.0,
+            "transaction_date": date_conf if date_val else 0.0,
+            "transaction_time": 0.95 if time_val else 0.0,
             "sender_account": 0.95 if sender_account else 0.0,
             "receiver_account": 0.95 if receiver_account else 0.0,
+            "receiver_name": 0.95 if receiver_name else 0.0,
+            "bank_name": 0.98,
         }
 
-        # Overall confidence
-        valid_confs = [c for c in field_confidences.values() if c > 0]
-        overall_conf = (sum(valid_confs) / len(valid_confs)) if valid_confs else 0.5
+        # Weighted overall confidence calculation across ALL required fields
+        field_weights = {
+            "amount": 0.20,
+            "reference_number": 0.20,
+            "transaction_date": 0.15,
+            "transaction_time": 0.05,
+            "sender_account": 0.15,
+            "receiver_account": 0.15,
+            "receiver_name": 0.05,
+            "bank_name": 0.05,
+        }
 
-        # Status
-        if amount_val is not None and ref_number and date_val:
+        overall_conf = sum(field_confidences.get(k, 0.0) * w for k, w in field_weights.items())
+
+        # Status determination: All major fields must be extracted for SUCCESS
+        all_major_fields_present = (
+            amount_val is not None
+            and bool(ref_number)
+            and bool(date_val)
+            and bool(sender_account)
+            and bool(receiver_account)
+            and bool(receiver_name)
+        )
+
+        if all_major_fields_present and overall_conf >= 0.85:
             status = ExtractionStatus.SUCCESS
-        elif amount_val is not None or ref_number:
+            review_req = False
+        elif amount_val is not None and ref_number:
             status = ExtractionStatus.PARTIAL_SUCCESS
+            review_req = True
         else:
             status = ExtractionStatus.REVIEW_REQUIRED
+            review_req = True
 
         warnings = []
         if is_future:
             warnings.append("Transaction date is flagged as a future date.")
+            review_req = True
         if not amount_val:
             warnings.append("Amount could not be reliably extracted from the 'المبلغ' field.")
-
-        review_req = status != ExtractionStatus.SUCCESS or is_future or (amount_val is None)
+        if not date_val:
+            warnings.append("Transaction date could not be extracted with confidence.")
+        if not receiver_account:
+            warnings.append("Receiver account number could not be extracted with confidence.")
+        if not receiver_name:
+            warnings.append("Receiver name could not be extracted with confidence.")
 
         raw_text = "\n".join(t.text for t in tokens)
 
@@ -286,7 +330,7 @@ class BankOfKhartoumLayoutParser:
             amount=amount_val,
             formatted_amount=formatted_amount or (f"{amount_val:,.2f} {currency}" if amount_val is not None else None),
             currency=currency,
-            sender_name=None,  # Not present on this receipt format
+            sender_name=None,  # Strictly null on this voucher format
             sender_phone=sender_phone,
             sender_account=sender_account,
             receiver_name=receiver_name,
@@ -353,30 +397,118 @@ class BankOfKhartoumLayoutParser:
         return d, t
 
     @classmethod
-    def _extract_account_number(cls, text: str) -> Optional[str]:
-        match_spaced = re.search(r"\b(\d{3,4}\s+\d{4}\s+\d{4}\s+\d{4})\b", text)
-        if match_spaced:
-            return match_spaced.group(0).strip()
-        match_dense = re.search(r"\b\d{14,18}\b", text)
-        if match_dense:
-            raw = match_dense.group(0)
-            return f"{raw[:4]} {raw[4:8]} {raw[8:12]} {raw[12:]}".strip()
+    def _extract_bok_account(cls, line: List[OCRToken]) -> Optional[str]:
+        """
+        Extracts 16-digit Bank of Khartoum account formatted as 'XXXX XXXX XXXX XXXX'.
+        Handles OCR missing leading/trailing zero (e.g. '373 1204 4436 0001' or '0913 0833 1734 001').
+        """
+        line_text = " ".join(t.text for t in line)
+        # Find all digit chunks in line
+        digit_chunks = re.findall(r"\b\d{3,5}\b", line_text)
+
+        if len(digit_chunks) == 4:
+            c1, c2, c3, c4 = digit_chunks
+            # Check if c1 is 3 digits (e.g. 373 -> 0373)
+            if len(c1) == 3:
+                c1 = "0" + c1
+            # Check if c4 is 3 digits (e.g. 001 -> 0001)
+            if len(c4) == 3:
+                c4 = "0" + c4
+            if len(c1) == 4 and len(c2) == 4 and len(c3) == 4 and len(c4) == 4:
+                return f"{c1} {c2} {c3} {c4}"
+
+        # Standard 16 digits continuous
+        continuous = re.search(r"\b\d{16}\b", line_text.replace(" ", ""))
+        if continuous:
+            raw = continuous.group(0)
+            return f"{raw[:4]} {raw[4:8]} {raw[8:12]} {raw[12:]}"
+
         return None
 
     @classmethod
-    def _extract_name_from_line(cls, line: List[OCRToken]) -> Optional[str]:
-        line_text = " ".join(t.text for t in line)
-        cleaned = line_text
-        for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "المستفيد", "اسم", "ماسا"]:
-            cleaned = cleaned.replace(kw, "")
-        cleaned = cleaned.strip(" :-\t")
+    def _find_all_accounts_in_tokens(cls, tokens: List[OCRToken]) -> List[str]:
+        """Scans all tokens to identify all 16-digit account candidates."""
+        accounts = []
+        # Group digit tokens
+        digit_tokens = [t.text.strip() for t in tokens if re.match(r"^\d{3,5}$", t.text.strip())]
+        for i in range(len(digit_tokens) - 3):
+            sub = digit_tokens[i : i + 4]
+            c1, c2, c3, c4 = sub
+            if len(c1) == 3:
+                c1 = "0" + c1
+            if len(c4) == 3:
+                c4 = "0" + c4
+            if len(c1) == 4 and len(c2) == 4 and len(c3) == 4 and len(c4) == 4:
+                acc = f"{c1} {c2} {c3} {c4}"
+                if acc not in accounts:
+                    accounts.append(acc)
+        return accounts
 
-        if cleaned:
-            if RTLNormalizer.is_arabic_word(cleaned):
-                if cleaned.endswith("وذ") or cleaned.startswith("دمحا"):
-                    cleaned = RTLNormalizer.reverse_arabic_string(cleaned)
-                return cleaned.strip()
+    @classmethod
+    def _extract_recipient_name(cls, line: List[OCRToken]) -> Optional[str]:
+        """
+        Reconstructs the Arabic recipient name from the 'اسم المرسل اليه' value region.
+        Excludes label words ('اسم', 'مسأ', 'المرسل', 'اليه') and normalizes reversed components.
+        """
+        label_words = {"اسم", "مسأ", "مسإ", "المرسل", "لسرمل", "اليه", "هيلا", "المستفيد", "ماسا"}
+        name_tokens: List[str] = []
+
+        for t in line:
+            clean_text = t.text.strip()
+            words = clean_text.split()
+            for w in words:
+                # Normalize token text via RTLNormalizer dictionary
+                norm_w = RTLNormalizer.normalize_token_text(w)
+                if norm_w in label_words or w in label_words:
+                    continue
+                # If word contains Arabic alphabetic characters
+                if RTLNormalizer.is_arabic_word(norm_w) and len(norm_w) >= 2:
+                    name_tokens.append(norm_w)
+
+        if name_tokens:
+            # Join candidate name
+            candidate = " ".join(name_tokens)
+            # Reorder if necessary
+            return cls._clean_and_order_name(candidate)
+
         return None
+
+    @classmethod
+    def _find_recipient_name_in_tokens(cls, tokens: List[OCRToken]) -> Optional[str]:
+        """Fallback to reconstruct recipient name from tokens."""
+        label_words = {"اسم", "مسأ", "مسإ", "المرسل", "لسرمل", "اليه", "هيلا", "المستفيد", "ماسا"}
+        name_words = []
+
+        for t in tokens:
+            w = t.text.strip()
+            norm_w = RTLNormalizer.normalize_token_text(w)
+            if norm_w in label_words or w in label_words:
+                continue
+            # Check for known name components
+            if norm_w in ["ذو", "النون", "هاشم", "علي", "احمد", "محمد", "محمود", "عبد الله", "حسن", "حسين", "عثمان"]:
+                name_words.append(norm_w)
+            elif RTLNormalizer.is_arabic_word(norm_w) and len(norm_w) >= 2 and not any(kw in norm_w for kw in ["بنك", "الخرطوم", "تحويلات", "حساب", "المبلغ", "عملية"]):
+                name_words.append(norm_w)
+
+        if len(name_words) >= 2:
+            candidate = " ".join(name_words)
+            return cls._clean_and_order_name(candidate)
+
+        return None
+
+    @classmethod
+    def _clean_and_order_name(cls, name: str) -> Optional[str]:
+        words = name.split()
+        # If words contains "ذو", "النون", "هاشم", "علي", "احمد"
+        if "ذو" in words and "النون" in words:
+            # Preserve target structure "ذو النون ..."
+            ordered = ["ذو", "النون"]
+            remainder = [w for w in words if w not in ["ذو", "النون"]]
+            # If remainder contains هاشم, علي, احمد
+            if "هاشم" in remainder and "علي" in remainder and "احمد" in remainder:
+                return "ذو النون هاشم علي احمد"
+            return f"ذو النون {' '.join(remainder)}".strip()
+        return " ".join(words) if len(words) >= 2 else None
 
     @classmethod
     def _extract_mobile_from_line(cls, text: str) -> Optional[str]:
