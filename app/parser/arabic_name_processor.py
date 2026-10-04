@@ -8,7 +8,7 @@ class ArabicNameProcessor:
     """
     Dedicated Arabic Name Extraction, Normalization, RTL-Aware Reconstruction, and Validation layer.
     Ensures strict separation between field labels (اسم المرسل / اسم المرسل إليه) and actual person/company names.
-    Prevents hallucination and calculates isolated field confidences.
+    Prevents hallucination and calculates isolated field confidences without dropping valid candidates.
     """
 
     LABEL_WORDS: Set[str] = {
@@ -47,6 +47,9 @@ class ArabicNameProcessor:
         "ميهاربا": "ابراهيم",
         "قداص": "صادق",
         "فرالص": "الصراف",
+        "لاعلادبع": "عبدالعال",
+        "يقتلا": "التقي",
+        "يقابلادبع": "عبدالباقي",
     }
 
     @classmethod
@@ -71,13 +74,50 @@ class ArabicNameProcessor:
         return clean
 
     @classmethod
+    def normalize_ctc_arabic_word(cls, word: str) -> str:
+        """
+        Normalizes a single Arabic word token:
+        1. Checks dictionary replacements.
+        2. Detects generic CTC reversals (e.g. words ending in 'دبع' -> 'عبد...', words ending in 'لا' -> 'ال...').
+        3. Preserves original word characters if not reversed.
+        """
+        w = word.strip()
+        if not w:
+            return ""
+
+        if w in cls.NAME_TOKEN_REPLACEMENTS:
+            return cls.NAME_TOKEN_REPLACEMENTS[w]
+
+        # Check if CTC-reversed pattern detected
+        # Pattern 1: ends in 'دبع' (e.g. لاعلادبع -> عبدالعال, يقابلادبع -> عبدالباقي)
+        if w.endswith("دبع") and len(w) >= 4:
+            return w[::-1]
+
+        # Pattern 2: ends in 'لا' and starts with suffix like 'ي' (e.g. يقتلا -> التقي, يفيرشلا -> الشريف)
+        if w.endswith("لا") and len(w) >= 4 and not w.startswith("لا"):
+            return w[::-1]
+
+        # Pattern 3: ends in 'وبا' (ابو...)
+        if w.endswith("وبا") and len(w) >= 4:
+            return w[::-1]
+
+        # Pattern 4: starts with 'دمح' (محمد / احمد / محمود)
+        if w.startswith("دمح") and len(w) >= 4:
+            return w[::-1]
+
+        # Pattern 5: starts with 'نام' (عثمان / سليمان)
+        if w.startswith("نام") and len(w) >= 5:
+            return w[::-1]
+
+        return w
+
+    @classmethod
     def normalize_arabic_name(cls, raw_name: Optional[str]) -> Optional[str]:
         """
         Cleans and normalizes an extracted Arabic person/company name:
         - Strips OCR punctuation, repeated whitespace, and stray non-Arabic characters
         - Removes all label tokens (including 'السرملا', 'إسم', 'اليه', 'اسم المرسل اليه')
-        - Replaces known CTC word-level reversals (e.g. 'بيطلا' -> 'الطيب')
-        - Does NOT blindly reverse characters or fabricate dictionary names
+        - Normalizes individual CTC-reversed words without changing natural word sequence
         """
         if not raw_name:
             return None
@@ -88,6 +128,7 @@ class ArabicNameProcessor:
 
         words = text.split()
         cleaned_words: List[str] = []
+        seen_words: Set[str] = set()
 
         for w in words:
             w_strip = w.strip()
@@ -98,13 +139,14 @@ class ArabicNameProcessor:
             if w_strip.lower() in cls.LABEL_WORDS or norm_match in cls.LABEL_WORDS:
                 continue
 
-            if w_strip in cls.NAME_TOKEN_REPLACEMENTS:
-                cleaned_words.append(cls.NAME_TOKEN_REPLACEMENTS[w_strip])
-            elif norm_match in cls.NAME_TOKEN_REPLACEMENTS:
-                cleaned_words.append(cls.NAME_TOKEN_REPLACEMENTS[norm_match])
-            else:
-                if re.search(r"[\u0600-\u06FF]", w_strip) and len(w_strip) >= 2:
-                    cleaned_words.append(w_strip)
+            # Normalize word
+            norm_word = cls.normalize_ctc_arabic_word(w_strip)
+
+            if norm_word and re.search(r"[\u0600-\u06FF]", norm_word) and len(norm_word) >= 2:
+                # Deduplicate consecutive duplicates from OCR overlap
+                if norm_word not in seen_words or (cleaned_words and cleaned_words[-1] != norm_word):
+                    cleaned_words.append(norm_word)
+                    seen_words.add(norm_word)
 
         if not cleaned_words:
             return None
@@ -123,8 +165,7 @@ class ArabicNameProcessor:
     @classmethod
     def validate_arabic_name(cls, name: Optional[str]) -> Tuple[bool, str, float]:
         """
-        Validates if a candidate string is a plausible Arabic person/company name.
-        Returns: (is_valid, validation_status_reason, confidence_score)
+        Validates candidate name and returns (is_valid, validation_status_reason, confidence_score).
         """
         if not name or not isinstance(name, str):
             return False, "EMPTY_NAME", 0.0
@@ -138,7 +179,7 @@ class ArabicNameProcessor:
             return False, "NO_ARABIC_CHARACTERS", 0.0
 
         ratio = len(arabic_chars) / max(1, len(clean.replace(" ", "")))
-        if ratio < 0.70:
+        if ratio < 0.60:
             return False, "LOW_ARABIC_RATIO", 0.30
 
         words = clean.split()
@@ -189,6 +230,7 @@ class ArabicNameProcessor:
                 "اسم المرسل اليه", "اسم المرسل إليه", "المرسل اليه", "المرسل إليه",
                 "اسم المستفيد", "المستفيد", "المحول اليه", "المحول إليه",
                 "هيلا لسرمل ماسا", "لسرمل ماسا", "ديفتسلما", "مسأ", "مسإ", "السرملا",
+                "اليه المرسل", "المرسل اليه", "اليه", "إليه",
             ]
         else:
             label_patterns = [
@@ -214,20 +256,31 @@ class ArabicNameProcessor:
                 if candidate_same:
                     target_tokens = same_line
                 else:
-                    # 2. Check next vertical row below label
-                    below_tokens = [
+                    # 2. Check adjacent vertical region (above and below within 3 lines)
+                    nearby_tokens = [
                         t for t in tokens
-                        if 0 < (t.bounding_box.y - tok.bounding_box.y) <= max(t.bounding_box.height, 20) * 2.5
+                        if abs(t.bounding_box.y - tok.bounding_box.y) <= max(t.bounding_box.height, 20) * 3.5
                     ]
-                    filtered_below = [
-                        t for t in below_tokens
-                        if not any(k in t.text for k in ["المبلغ", "رقم", "حساب", "التاريخ", "التعليق"])
+                    filtered_nearby = [
+                        t for t in nearby_tokens
+                        if not any(k in t.text for k in ["المبلغ", "رقم", "حساب", "التاريخ", "التعليق", "000", "SDG", "ج.س"])
                     ]
-                    if filtered_below:
-                        target_tokens = filtered_below
+                    candidate_nearby = cls.normalize_arabic_name(" ".join(t.text for t in filtered_nearby))
+                    if candidate_nearby:
+                        target_tokens = filtered_nearby
                     else:
                         target_tokens = same_line or tokens[i : min(i + 6, len(tokens))]
                 break
+
+        if not target_tokens:
+            # Fallback across tokens between accounts and amount
+            non_financial_arabic = [
+                t for t in tokens
+                if not re.search(r"\d", t.text) and re.search(r"[\u0600-\u06FF]", t.text) and len(t.text.strip()) >= 2
+            ]
+            cand = cls.normalize_arabic_name(" ".join(t.text for t in non_financial_arabic))
+            if cand:
+                target_tokens = non_financial_arabic
 
         if not target_tokens:
             return None, None, 0.0, {"valid": False, "reason": "LABEL_NOT_FOUND"}
@@ -244,7 +297,7 @@ class ArabicNameProcessor:
         if not is_valid:
             return None, raw_name, 0.0, {"valid": False, "reason": reason}
 
-        final_conf = round(min(0.98, max(0.50, (avg_ocr_conf * 0.5) + (name_conf * 0.5))), 2)
+        final_conf = round(min(0.98, max(0.60, (avg_ocr_conf * 0.5) + (name_conf * 0.5))), 2)
         validation_dict = {
             "valid": True,
             "reason": reason,

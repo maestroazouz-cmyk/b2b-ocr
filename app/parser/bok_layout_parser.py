@@ -121,7 +121,7 @@ class BankOfKhartoumLayoutParser:
                     ref_source = line_text
 
             # 2. Date & Time (التاريخ والزمن)
-            if any(kw in line_text for kw in ["التاريخ", "التاريخ والزمن", "خيراتلا", "نمزلاو خيراتلا", "Date"]):
+            if any(kw in line_text for kw in ["التاريخ", "التاريخ والزمن", "خيراتلا", "نمزلاو خيراتلا", "Date", "الزمن"]):
                 d, t = cls._extract_datetime_from_line(line)
                 if d:
                     date_val = d
@@ -142,7 +142,7 @@ class BankOfKhartoumLayoutParser:
                     receiver_account = acc
 
             # 5. Recipient Name (اسم المرسل اليه -> strictly receiver_name)
-            if any(kw in line_text for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "لسرمل ماسا", "المستفيد", "المرسل", "اليه", "السرملا", "إسم", "مسأ"]):
+            if any(kw in line_text for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "لسرمل ماسا", "المستفيد", "المرسل", "اليه", "السرملا", "إسم", "مسأ", "اليه المرسل"]):
                 norm_n, raw_n, n_conf, n_val = ArabicNameProcessor.extract_name_from_tokens(line, "receiver_name")
                 if norm_n:
                     receiver_name = norm_n
@@ -173,20 +173,21 @@ class BankOfKhartoumLayoutParser:
                     amount_source = line_text
 
         # Step 4: Spatial Fallback for fields spanning adjacent lines or fragmented OCR
-        # 4a. Date & Time fallback
-        if not date_val:
+        # 4a. Date & Time fallback across all tokens
+        if not date_val or not time_val:
             d_val, t_val, d_ev, _ = DateParser.parse(norm_tokens)
-            if d_val:
+            if d_val and not date_val:
                 date_val = d_val
-                time_val = t_val or time_val
                 date_conf = d_ev.confidence
                 date_source = d_ev.source_text or ""
+            if t_val and not time_val:
+                time_val = t_val
 
         # 4b. Transaction ID fallback
         if not ref_number:
             for t in norm_tokens:
                 clean_num = re.sub(r"[^\d]", "", t.text)
-                if len(clean_num) in [10, 11, 12] and (clean_num.startswith("202") or clean_num.startswith("201") or clean_num.startswith("200")):
+                if len(clean_num) in [10, 11, 12] and (clean_num.startswith("202") or clean_num.startswith("201") or clean_num.startswith("203") or clean_num.startswith("200")):
                     ref_number = clean_num
                     ref_conf = t.confidence
                     ref_source = t.text
@@ -201,7 +202,7 @@ class BankOfKhartoumLayoutParser:
                 if not receiver_account and len(acc_candidates) >= 2:
                     receiver_account = acc_candidates[1]
 
-        # 4d. Recipient Name fallback across all tokens
+        # 4d. Recipient Name fallback across tokens
         if not receiver_name:
             norm_n, raw_n, n_conf, n_val = ArabicNameProcessor.extract_name_from_tokens(norm_tokens, "receiver_name")
             if norm_n:
@@ -257,7 +258,7 @@ class BankOfKhartoumLayoutParser:
                 "raw_value": receiver_name_raw,
                 "confidence": receiver_name_conf if receiver_name else 0.0,
                 "source_text": receiver_name_raw or receiver_name,
-                "evidence": f"Extracted from value region associated with label 'اسم المرسل اليه': '{receiver_name}'" if receiver_name else None,
+                "evidence": f"Selected Arabic tokens spatially associated with recipient-name label; label tokens excluded: '{receiver_name}'" if receiver_name else None,
                 "label": "اسم المرسل اليه",
                 "normalization_applied": bool(receiver_name_raw and receiver_name != receiver_name_raw),
             },
@@ -306,7 +307,7 @@ class BankOfKhartoumLayoutParser:
 
         overall_conf = sum(field_confidences.get(k, 0.0) * w for k, w in field_weights.items())
 
-        # Status determination: All major fields must be extracted for SUCCESS
+        # Status determination
         all_major_fields_present = (
             amount_val is not None
             and bool(ref_number)
@@ -430,11 +431,7 @@ class BankOfKhartoumLayoutParser:
         digit_chunks = re.findall(r"\b\d{3,5}\b", line_text)
 
         if len(digit_chunks) == 4:
-            c1, c2, c3, c4 = digit_chunks
-            if len(c1) == 3:
-                c1 = "0" + c1
-            if len(c4) == 3:
-                c4 = "0" + c4
+            c1, c2, c3, c4 = [c.zfill(4) if len(c) == 3 else c for c in digit_chunks]
             if len(c1) == 4 and len(c2) == 4 and len(c3) == 4 and len(c4) == 4:
                 return f"{c1} {c2} {c3} {c4}"
 
@@ -452,11 +449,7 @@ class BankOfKhartoumLayoutParser:
         digit_tokens = [t.text.strip() for t in tokens if re.match(r"^\d{3,5}$", t.text.strip())]
         for i in range(len(digit_tokens) - 3):
             sub = digit_tokens[i : i + 4]
-            c1, c2, c3, c4 = sub
-            if len(c1) == 3:
-                c1 = "0" + c1
-            if len(c4) == 3:
-                c4 = "0" + c4
+            c1, c2, c3, c4 = [c.zfill(4) if len(c) == 3 else c for c in sub]
             if len(c1) == 4 and len(c2) == 4 and len(c3) == 4 and len(c4) == 4:
                 acc = f"{c1} {c2} {c3} {c4}"
                 if acc not in accounts:
