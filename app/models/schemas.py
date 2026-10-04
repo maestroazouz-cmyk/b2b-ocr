@@ -68,6 +68,9 @@ class EvidenceField(BaseModel):
     confidence: float = 0.0
     source_text: Optional[str] = None
     evidence: Optional[str] = None
+    raw_value: Optional[str] = None
+    label: Optional[str] = None
+    normalization_applied: bool = False
 
 
 class ValidationMetadata(BaseModel):
@@ -83,11 +86,18 @@ class StructuredReceiptData(BaseModel):
     formatted_amount: Optional[str] = None
     currency: str = "SDG"
     sender_name: Optional[str] = None
+    sender_name_raw: Optional[str] = None
+    sender_name_confidence: Optional[float] = None
+    sender_name_validation: Optional[Dict[str, Any]] = None
     sender_phone: Optional[str] = None
     sender_account: Optional[str] = None
     receiver_name: Optional[str] = None
+    receiver_name_raw: Optional[str] = None
+    receiver_name_confidence: Optional[float] = None
+    receiver_name_validation: Optional[Dict[str, Any]] = None
     receiver_phone: Optional[str] = None
     receiver_account: Optional[str] = None
+    name_review_required: bool = False
     transaction_date: Optional[str] = None  # YYYY-MM-DD
     transaction_time: Optional[str] = None  # HH:mm:ss
     reference_number: Optional[str] = None
@@ -104,7 +114,7 @@ class StructuredReceiptData(BaseModel):
     overall_confidence: float = 0.0
     warnings: List[str] = Field(default_factory=list)
     review_required: bool = True
-    extraction_version: str = "b2b-ocr-v1"
+    extraction_version: str = "b2b-ocr-v2"
     evidence_map: Optional[Dict[str, Any]] = None
     validation_metadata: Optional[ValidationMetadata] = None
     result_status: ExtractionStatus = ExtractionStatus.REVIEW_REQUIRED

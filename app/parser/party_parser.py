@@ -1,6 +1,7 @@
 import re
 from typing import List, Optional, Tuple
 from app.models.schemas import OCRToken, EvidenceField
+from app.parser.arabic_name_processor import ArabicNameProcessor
 
 
 class PartyParser:
@@ -29,30 +30,14 @@ class PartyParser:
         "اسم المستفيد",
         "المستفيد",
         "المحول إليه",
+        "المحول اليه",
         "إلى",
+        "الى",
         "المستقبل",
         "Beneficiary",
         "Receiver",
         "To",
         "Payee",
-    ]
-
-    PLACEHOLDER_NAMES = [
-        "unknown",
-        "n/a",
-        "not available",
-        "customer",
-        "sender",
-        "receiver",
-        "client",
-        "user",
-        "test user",
-        "sample",
-        "null",
-        "none",
-        "غير معروف",
-        "العميل",
-        "المستفيد",
     ]
 
     @classmethod
@@ -77,94 +62,48 @@ class PartyParser:
         sender_ev = EvidenceField(value=None, confidence=0.0)
         receiver_ev = EvidenceField(value=None, confidence=0.0)
 
-        # 1. Extract Sender
-        for i, token in enumerate(tokens):
-            norm_text = token.text.strip()
-            lbl = next((l for l in cls.SENDER_LABELS if norm_text.startswith(l) or f" {l} " in f" {norm_text} "), None)
+        # 1. Extract Sender via ArabicNameProcessor
+        s_norm, s_raw, s_conf, s_val = ArabicNameProcessor.extract_name_from_tokens(tokens, "sender_name")
+        if s_norm:
+            sender_name = s_norm
+            sender_ev = EvidenceField(
+                value=s_norm,
+                raw_value=s_raw,
+                confidence=s_conf,
+                source_text=s_raw or s_norm,
+                evidence=f"Extracted sender name: '{s_norm}'",
+                label="اسم المرسل",
+                normalization_applied=bool(s_raw and s_norm != s_raw),
+            )
 
-            if lbl:
-                cand = norm_text.replace(lbl, "").strip(" :-\t")
-                if cls._is_valid_name(cand):
-                    sender_name = cand
-                    sender_ev = EvidenceField(
-                        value=cand,
-                        confidence=min(0.95, token.confidence),
-                        source_text=token.text,
-                        evidence=f"Sender label '{lbl}' in token: '{token.text}'",
-                    )
-                    break
-
-                for j in range(i + 1, min(i + 3, len(tokens))):
-                    adj = tokens[j]
-                    adj_text = adj.text.strip(" :-\t")
-                    if cls._is_valid_name(adj_text):
-                        sender_name = adj_text
-                        conf = min(0.92, (token.confidence + adj.confidence) / 2.0)
-                        sender_ev = EvidenceField(
-                            value=adj_text,
-                            confidence=conf,
-                            source_text=f"{token.text} -> {adj.text}",
-                            evidence=f"Sender label '{lbl}' followed by '{adj.text}'",
-                        )
-                        break
-                if sender_name:
-                    break
-
-        # 2. Extract Receiver
-        for i, token in enumerate(tokens):
-            norm_text = token.text.strip()
-            lbl = next((l for l in cls.RECEIVER_LABELS if norm_text.startswith(l) or f" {l} " in f" {norm_text} "), None)
-
-            if lbl:
-                cand = norm_text.replace(lbl, "").strip(" :-\t")
-                if cls._is_valid_name(cand):
-                    receiver_name = cand
-                    receiver_ev = EvidenceField(
-                        value=cand,
-                        confidence=min(0.95, token.confidence),
-                        source_text=token.text,
-                        evidence=f"Receiver label '{lbl}' in token: '{token.text}'",
-                    )
-                    break
-
-                for j in range(i + 1, min(i + 3, len(tokens))):
-                    adj = tokens[j]
-                    adj_text = adj.text.strip(" :-\t")
-                    if cls._is_valid_name(adj_text):
-                        receiver_name = adj_text
-                        conf = min(0.92, (token.confidence + adj.confidence) / 2.0)
-                        receiver_ev = EvidenceField(
-                            value=adj_text,
-                            confidence=conf,
-                            source_text=f"{token.text} -> {adj.text}",
-                            evidence=f"Receiver label '{lbl}' followed by '{adj.text}'",
-                        )
-                        break
-                if receiver_name:
-                    break
+        # 2. Extract Receiver via ArabicNameProcessor
+        r_norm, r_raw, r_conf, r_val = ArabicNameProcessor.extract_name_from_tokens(tokens, "receiver_name")
+        if r_norm:
+            receiver_name = r_norm
+            receiver_ev = EvidenceField(
+                value=r_norm,
+                raw_value=r_raw,
+                confidence=r_conf,
+                source_text=r_raw or r_norm,
+                evidence=f"Extracted receiver name: '{r_norm}'",
+                label="اسم المستفيد",
+                normalization_applied=bool(r_raw and r_norm != r_raw),
+            )
 
         # 3. Account numbers
         for token in tokens:
             if "حساب" in token.text or "Account" in token.text:
-                acc_match = re.search(r"\b\d{8,20}\b", token.text)
+                acc_match = re.search(r"\b\d{8,20}\b", token.text.replace(" ", ""))
                 if acc_match:
+                    raw_acc = acc_match.group(0)
+                    if len(raw_acc) == 16:
+                        formatted = f"{raw_acc[:4]} {raw_acc[4:8]} {raw_acc[8:12]} {raw_acc[12:]}"
+                    else:
+                        formatted = raw_acc
+
                     if not sender_acc:
-                        sender_acc = acc_match.group(0)
-                    elif not receiver_acc:
-                        receiver_acc = acc_match.group(0)
+                        sender_acc = formatted
+                    elif not receiver_acc and formatted != sender_acc:
+                        receiver_acc = formatted
 
         return sender_name, sender_ev, receiver_name, receiver_ev, sender_acc, receiver_acc
-
-    @classmethod
-    def _is_valid_name(cls, text: str) -> bool:
-        if not text or len(text) < 3:
-            return False
-        if text.lower() in cls.PLACEHOLDER_NAMES:
-            return False
-        # Must contain at least some Arabic or Latin alphabetic characters
-        if not re.search(r"[a-zA-Z\u0600-\u06FF]", text):
-            return False
-        # Should not be pure digits or date string
-        if re.match(r"^[\d\-\/\.\s,]+$", text):
-            return False
-        return True

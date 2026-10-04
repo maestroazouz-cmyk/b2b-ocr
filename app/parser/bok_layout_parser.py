@@ -15,6 +15,7 @@ from app.models.schemas import (
 )
 from app.parser.date_parser import DateParser
 from app.parser.amount_parser import AmountParser
+from app.parser.arabic_name_processor import ArabicNameProcessor
 from app.ocr.rtl_normalizer import RTLNormalizer
 
 
@@ -94,6 +95,9 @@ class BankOfKhartoumLayoutParser:
         sender_account: Optional[str] = None
         receiver_account: Optional[str] = None
         receiver_name: Optional[str] = None
+        receiver_name_raw: Optional[str] = None
+        receiver_name_conf: float = 0.0
+        receiver_name_val_meta: Dict[str, Any] = {}
         sender_phone: Optional[str] = None
         receiver_phone: Optional[str] = None
         narration: Optional[str] = None
@@ -138,10 +142,13 @@ class BankOfKhartoumLayoutParser:
                     receiver_account = acc
 
             # 5. Recipient Name (اسم المرسل اليه -> strictly receiver_name)
-            if any(kw in line_text for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "لسرمل ماسا", "المستفيد", "المرسل", "اليه"]):
-                name = cls._extract_recipient_name(line)
-                if name:
-                    receiver_name = name
+            if any(kw in line_text for kw in ["اسم المرسل اليه", "المرسل اليه", "هيلا لسرمل ماسا", "لسرمل ماسا", "المستفيد", "المرسل", "اليه", "السرملا", "إسم", "مسأ"]):
+                norm_n, raw_n, n_conf, n_val = ArabicNameProcessor.extract_name_from_tokens(line, "receiver_name")
+                if norm_n:
+                    receiver_name = norm_n
+                    receiver_name_raw = raw_n
+                    receiver_name_conf = n_conf
+                    receiver_name_val_meta = n_val
 
             # 6. Mobile (رقم الموبايل)
             if any(kw in line_text for kw in ["رقم الموبايل", "ليابوم مقر", "الموبايل", "الهاتف"]):
@@ -179,7 +186,7 @@ class BankOfKhartoumLayoutParser:
         if not ref_number:
             for t in norm_tokens:
                 clean_num = re.sub(r"[^\d]", "", t.text)
-                if len(clean_num) in [10, 11, 12] and (clean_num.startswith("202") or clean_num.startswith("201")):
+                if len(clean_num) in [10, 11, 12] and (clean_num.startswith("202") or clean_num.startswith("201") or clean_num.startswith("200")):
                     ref_number = clean_num
                     ref_conf = t.confidence
                     ref_source = t.text
@@ -196,7 +203,12 @@ class BankOfKhartoumLayoutParser:
 
         # 4d. Recipient Name fallback across all tokens
         if not receiver_name:
-            receiver_name = cls._find_recipient_name_in_tokens(norm_tokens)
+            norm_n, raw_n, n_conf, n_val = ArabicNameProcessor.extract_name_from_tokens(norm_tokens, "receiver_name")
+            if norm_n:
+                receiver_name = norm_n
+                receiver_name_raw = raw_n
+                receiver_name_conf = n_conf
+                receiver_name_val_meta = n_val
 
         # 4e. Amount fallback
         if not amount_val:
@@ -242,9 +254,12 @@ class BankOfKhartoumLayoutParser:
             },
             "receiver_name": {
                 "value": receiver_name,
-                "confidence": 0.95 if receiver_name else 0.0,
-                "source_text": receiver_name,
+                "raw_value": receiver_name_raw,
+                "confidence": receiver_name_conf if receiver_name else 0.0,
+                "source_text": receiver_name_raw or receiver_name,
                 "evidence": f"Extracted from value region associated with label 'اسم المرسل اليه': '{receiver_name}'" if receiver_name else None,
+                "label": "اسم المرسل اليه",
+                "normalization_applied": bool(receiver_name_raw and receiver_name != receiver_name_raw),
             },
             "sender_account": {
                 "value": sender_account,
@@ -273,7 +288,7 @@ class BankOfKhartoumLayoutParser:
             "transaction_time": 0.95 if time_val else 0.0,
             "sender_account": 0.95 if sender_account else 0.0,
             "receiver_account": 0.95 if receiver_account else 0.0,
-            "receiver_name": 0.95 if receiver_name else 0.0,
+            "receiver_name": receiver_name_conf if receiver_name else 0.0,
             "bank_name": 0.98,
         }
 
@@ -300,6 +315,8 @@ class BankOfKhartoumLayoutParser:
             and bool(receiver_account)
             and bool(receiver_name)
         )
+
+        name_review_req = receiver_name is None or receiver_name_conf < 0.70
 
         if all_major_fields_present and overall_conf >= 0.85:
             status = ExtractionStatus.SUCCESS
@@ -330,12 +347,19 @@ class BankOfKhartoumLayoutParser:
             amount=amount_val,
             formatted_amount=formatted_amount or (f"{amount_val:,.2f} {currency}" if amount_val is not None else None),
             currency=currency,
-            sender_name=None,  # Strictly null on this voucher format
+            sender_name=None,
+            sender_name_raw=None,
+            sender_name_confidence=None,
+            sender_name_validation=None,
             sender_phone=sender_phone,
             sender_account=sender_account,
             receiver_name=receiver_name,
+            receiver_name_raw=receiver_name_raw,
+            receiver_name_confidence=receiver_name_conf if receiver_name else None,
+            receiver_name_validation=receiver_name_val_meta if receiver_name else None,
             receiver_phone=receiver_phone,
             receiver_account=receiver_account,
+            name_review_required=name_review_req,
             transaction_date=date_val,
             transaction_time=time_val,
             reference_number=ref_number,
@@ -403,21 +427,17 @@ class BankOfKhartoumLayoutParser:
         Handles OCR missing leading/trailing zero (e.g. '373 1204 4436 0001' or '0913 0833 1734 001').
         """
         line_text = " ".join(t.text for t in line)
-        # Find all digit chunks in line
         digit_chunks = re.findall(r"\b\d{3,5}\b", line_text)
 
         if len(digit_chunks) == 4:
             c1, c2, c3, c4 = digit_chunks
-            # Check if c1 is 3 digits (e.g. 373 -> 0373)
             if len(c1) == 3:
                 c1 = "0" + c1
-            # Check if c4 is 3 digits (e.g. 001 -> 0001)
             if len(c4) == 3:
                 c4 = "0" + c4
             if len(c1) == 4 and len(c2) == 4 and len(c3) == 4 and len(c4) == 4:
                 return f"{c1} {c2} {c3} {c4}"
 
-        # Standard 16 digits continuous
         continuous = re.search(r"\b\d{16}\b", line_text.replace(" ", ""))
         if continuous:
             raw = continuous.group(0)
@@ -429,7 +449,6 @@ class BankOfKhartoumLayoutParser:
     def _find_all_accounts_in_tokens(cls, tokens: List[OCRToken]) -> List[str]:
         """Scans all tokens to identify all 16-digit account candidates."""
         accounts = []
-        # Group digit tokens
         digit_tokens = [t.text.strip() for t in tokens if re.match(r"^\d{3,5}$", t.text.strip())]
         for i in range(len(digit_tokens) - 3):
             sub = digit_tokens[i : i + 4]
@@ -443,72 +462,6 @@ class BankOfKhartoumLayoutParser:
                 if acc not in accounts:
                     accounts.append(acc)
         return accounts
-
-    @classmethod
-    def _extract_recipient_name(cls, line: List[OCRToken]) -> Optional[str]:
-        """
-        Reconstructs the Arabic recipient name from the 'اسم المرسل اليه' value region.
-        Excludes label words ('اسم', 'مسأ', 'المرسل', 'اليه') and normalizes reversed components.
-        """
-        label_words = {"اسم", "مسأ", "مسإ", "المرسل", "لسرمل", "اليه", "هيلا", "المستفيد", "ماسا"}
-        name_tokens: List[str] = []
-
-        for t in line:
-            clean_text = t.text.strip()
-            words = clean_text.split()
-            for w in words:
-                # Normalize token text via RTLNormalizer dictionary
-                norm_w = RTLNormalizer.normalize_token_text(w)
-                if norm_w in label_words or w in label_words:
-                    continue
-                # If word contains Arabic alphabetic characters
-                if RTLNormalizer.is_arabic_word(norm_w) and len(norm_w) >= 2:
-                    name_tokens.append(norm_w)
-
-        if name_tokens:
-            # Join candidate name
-            candidate = " ".join(name_tokens)
-            # Reorder if necessary
-            return cls._clean_and_order_name(candidate)
-
-        return None
-
-    @classmethod
-    def _find_recipient_name_in_tokens(cls, tokens: List[OCRToken]) -> Optional[str]:
-        """Fallback to reconstruct recipient name from tokens."""
-        label_words = {"اسم", "مسأ", "مسإ", "المرسل", "لسرمل", "اليه", "هيلا", "المستفيد", "ماسا"}
-        name_words = []
-
-        for t in tokens:
-            w = t.text.strip()
-            norm_w = RTLNormalizer.normalize_token_text(w)
-            if norm_w in label_words or w in label_words:
-                continue
-            # Check for known name components
-            if norm_w in ["ذو", "النون", "هاشم", "علي", "احمد", "محمد", "محمود", "عبد الله", "حسن", "حسين", "عثمان"]:
-                name_words.append(norm_w)
-            elif RTLNormalizer.is_arabic_word(norm_w) and len(norm_w) >= 2 and not any(kw in norm_w for kw in ["بنك", "الخرطوم", "تحويلات", "حساب", "المبلغ", "عملية"]):
-                name_words.append(norm_w)
-
-        if len(name_words) >= 2:
-            candidate = " ".join(name_words)
-            return cls._clean_and_order_name(candidate)
-
-        return None
-
-    @classmethod
-    def _clean_and_order_name(cls, name: str) -> Optional[str]:
-        words = name.split()
-        # If words contains "ذو", "النون", "هاشم", "علي", "احمد"
-        if "ذو" in words and "النون" in words:
-            # Preserve target structure "ذو النون ..."
-            ordered = ["ذو", "النون"]
-            remainder = [w for w in words if w not in ["ذو", "النون"]]
-            # If remainder contains هاشم, علي, احمد
-            if "هاشم" in remainder and "علي" in remainder and "احمد" in remainder:
-                return "ذو النون هاشم علي احمد"
-            return f"ذو النون {' '.join(remainder)}".strip()
-        return " ".join(words) if len(words) >= 2 else None
 
     @classmethod
     def _extract_mobile_from_line(cls, text: str) -> Optional[str]:
