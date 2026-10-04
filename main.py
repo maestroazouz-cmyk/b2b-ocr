@@ -28,7 +28,7 @@ logger = logging.getLogger("b2b_ocr.main")
 app = FastAPI(
     title="B2B Sudanese Payment Receipt OCR Microservice",
     description="Dedicated PaddleOCR engine & deterministic Sudanese payment voucher parser for B2B Corporate Banking",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 # CORS configuration
@@ -53,7 +53,7 @@ async def health_check():
         "service": "b2b-paddleocr-service",
         "ocr_engine": "PaddleOCR PP-OCRv4 (Arabic/English)",
         "ocr_engine_ready": is_ready,
-        "parser_version": "b2b-ocr-v1",
+        "parser_version": "b2b-ocr-v2",
         "timezone": "Africa/Khartoum (UTC+2)",
     }
 
@@ -145,11 +145,37 @@ async def process_ocr(request: OCRRequest):
 @app.post("/test-file")
 async def test_file_upload(file: UploadFile = File(...)):
     """
-    Direct multipart file upload test endpoint.
+    Direct multipart file upload test endpoint (Original).
     """
     import base64
 
     contents = await file.read()
+    b64_str = base64.b64encode(contents).decode("utf-8")
+    req = OCRRequest(imageBase64=b64_str, mimeType=file.content_type or "image/jpeg")
+    return await process_ocr(req)
+
+
+@app.post("/test-ocr", response_model=OCRResponse, status_code=status.HTTP_200_OK)
+async def test_ocr_upload(file: UploadFile = File(...)):
+    """
+    Dedicated test endpoint for multipart/form-data receipt file uploads.
+    Reuses the exact same robust PaddleOCR & layout extraction pipeline as /test-file and /ocr.
+    """
+    import base64
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No receipt file was provided. Form-data field 'file' is required.",
+        )
+
+    contents = await file.read()
+    if len(contents) < 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty or too small.",
+        )
+
     b64_str = base64.b64encode(contents).decode("utf-8")
     req = OCRRequest(imageBase64=b64_str, mimeType=file.content_type or "image/jpeg")
     return await process_ocr(req)
